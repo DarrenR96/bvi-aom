@@ -5,7 +5,7 @@ with open("README.md", "r") as f:
 
 setup(
     name='bvi_aom',
-    version='0.2',
+    version='0.3',
     packages=find_packages(),
     install_requires = [
         'wget'

@@ -1,10 +1,21 @@
 from typing import Union
 import os 
-import wget
+import subprocess
 import tarfile
 
 class BVIAOMDataset:
-    def __init__(self, storage_path: str, resolutions: Union[tuple[str], list[str], str], remove_tar: bool = False):
+    def __init__(self, storage_path: str, resolutions: Union[tuple[str], list[str], str], remove_tar: bool = False,
+                 timeout: int = 300, max_retries: int = 10):
+        """
+        Initialize the BVI-AOM Dataset downloader.
+        
+        Args:
+            storage_path: Path to store the downloaded files
+            resolutions: Resolution(s) to download
+            remove_tar: Whether to remove tar files after extraction
+            timeout: Timeout in seconds for wget (detects stalls). Default 300s (5 min).
+            max_retries: Maximum number of retry attempts for stalled downloads. Default 10.
+        """
         allowed_resolutions = {'3840x2176', '1920x1088', '960x544', '480x272'}
 
         # Normalize resolutions to a list for validation
@@ -22,6 +33,8 @@ class BVIAOMDataset:
         self.storage_path = storage_path
         self.resolutions = resolutions
         self.remove_tar = remove_tar
+        self.timeout = timeout
+        self.max_retries = max_retries
         self.cloud_links = {
             '3840x2176': ['http://download.opencontent.netflix.com.s3.amazonaws.com/bvi_aom_dataset/2176p_part_a.tar.gz',
             'http://download.opencontent.netflix.com.s3.amazonaws.com/bvi_aom_dataset/2176p_part_b.tar.gz',
@@ -57,12 +70,58 @@ class BVIAOMDataset:
             self._unpack_tar(local_tar_file, self.storage_path)
 
     def _download_file(self, url_link: str, save_dir: str) -> None:
+        """
+        Download a file using wget via subprocess with retry support for stalled downloads.
+        
+        Uses wget's -c flag to continue partial downloads if they exist.
+        If the download stalls (no data received within timeout), it will automatically
+        retry up to max_retries times, continuing from where it left off.
+        """
         file_name = os.path.basename(url_link)
-        if os.path.exists(os.path.join(save_dir, file_name)):
-            print(f"File {os.path.join(self.storage_path, file_name)} already found, skipping download...")
+        file_path = os.path.join(save_dir, file_name)
+        
+        # Check if complete file already exists (simple check - file exists and is non-empty)
+        # Note: wget -c will handle partial files automatically
+        if os.path.exists(file_path):
+            # We'll still run wget with -c to verify/complete the download
+            print(f"File {file_path} found, verifying/continuing download if needed...")
         else:
             print(f"Downloading {file_name} to {save_dir}...")
-            wget.download(url_link, save_dir)
+        
+        attempt = 0
+        while attempt < self.max_retries:
+            try:
+                # wget flags:
+                # -c: continue partial downloads
+                # -P: directory prefix (output directory)
+                # --timeout: timeout for read operations (detects stalls)
+                # --tries=1: only one try per subprocess call (we handle retries ourselves)
+                cmd = [
+                    'wget',
+                    '-c',
+                    '--timeout', str(self.timeout),
+                    '--tries', '1',
+                    '-P', save_dir,
+                    url_link
+                ]
+                
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                print(f"Download completed: {file_name}")
+                return  # Success, exit the retry loop
+                
+            except subprocess.CalledProcessError as e:
+                attempt += 1
+                # Exit code 4 typically means network failure/timeout in wget
+                # Exit code 8 means server error
+                if attempt < self.max_retries:
+                    print(f"\nDownload stalled or failed (attempt {attempt}/{self.max_retries}). "
+                          f"Retrying and continuing from where we left off...")
+                else:
+                    print(f"\nDownload failed after {self.max_retries} attempts.")
+                    print(f"wget stderr: {e.stderr}")
+                    raise RuntimeError(f"Failed to download {file_name} after {self.max_retries} attempts") from e
+            except FileNotFoundError:
+                raise RuntimeError("wget is not installed or not found in PATH. Please install wget.")
     
     def _unpack_tar(self, tar_file: str, out_folder: str) -> None:
         try:
@@ -90,7 +149,12 @@ def main():
                         help='Resolution(s) to download: 3840x2176, 1920x1088, 960x544, 480x272')
     parser.add_argument('--remove-tar', action='store_true',
                         help='Remove tar files after extraction')
+    parser.add_argument('--timeout', '-t', type=int, default=300,
+                        help='Timeout in seconds for detecting stalled downloads (default: 300)')
+    parser.add_argument('--max-retries', '-m', type=int, default=10,
+                        help='Maximum retry attempts for stalled downloads (default: 10)')
     
     args = parser.parse_args()
     
-    BVIAOMDataset(args.storage_path, args.resolutions, remove_tar=args.remove_tar)
+    BVIAOMDataset(args.storage_path, args.resolutions, remove_tar=args.remove_tar,
+                  timeout=args.timeout, max_retries=args.max_retries)
