@@ -1,1 +1,2 @@
-# No Python dependencies required - uses system wget via subprocess
+requests
+tqdm

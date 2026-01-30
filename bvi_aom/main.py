@@ -1,7 +1,9 @@
 from typing import Union
 import os 
-import subprocess
 import tarfile
+
+import requests
+from tqdm import tqdm
 
 class BVIAOMDataset:
     def __init__(self, storage_path: str, resolutions: Union[tuple[str], list[str], str], remove_tar: bool = False,
@@ -71,57 +73,81 @@ class BVIAOMDataset:
 
     def _download_file(self, url_link: str, save_dir: str) -> None:
         """
-        Download a file using wget via subprocess with retry support for stalled downloads.
+        Download a file using requests with resume support.
         
-        Uses wget's -c flag to continue partial downloads if they exist.
-        If the download stalls (no data received within timeout), it will automatically
-        retry up to max_retries times, continuing from where it left off.
+        Uses HTTP Range headers to continue partial downloads if they exist.
+        If the download stalls or fails, it will automatically retry up to 
+        max_retries times, continuing from where it left off.
         """
         file_name = os.path.basename(url_link)
         file_path = os.path.join(save_dir, file_name)
         
-        # Check if complete file already exists (simple check - file exists and is non-empty)
-        # Note: wget -c will handle partial files automatically
-        if os.path.exists(file_path):
-            # We'll still run wget with -c to verify/complete the download
-            print(f"File {file_path} found, verifying/continuing download if needed...")
-        else:
-            print(f"Downloading {file_name} to {save_dir}...")
-        
         attempt = 0
         while attempt < self.max_retries:
             try:
-                # wget flags:
-                # -c: continue partial downloads
-                # -P: directory prefix (output directory)
-                # --timeout: timeout for read operations (detects stalls)
-                # --tries=1: only one try per subprocess call (we handle retries ourselves)
-                cmd = [
-                    'wget',
-                    '-c',
-                    '--timeout', str(self.timeout),
-                    '--tries', '1',
-                    '-P', save_dir,
-                    url_link
-                ]
+                # Get current file size for resume
+                resume_pos = os.path.getsize(file_path) if os.path.exists(file_path) else 0
                 
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                # Set Range header for resume
+                headers = {'Range': f'bytes={resume_pos}-'} if resume_pos else {}
+                
+                if resume_pos:
+                    print(f"Resuming {file_name} from {resume_pos / (1024**3):.2f} GB...")
+                else:
+                    print(f"Downloading {file_name} to {save_dir}...")
+                
+                # timeout=(connect_timeout, read_timeout)
+                # - connect: time to establish connection (10s is usually enough)
+                # - read: time to wait for data chunks (detects stalls)
+                with requests.get(url_link, headers=headers, stream=True, timeout=(10, self.timeout)) as r:
+                    r.raise_for_status()
+                    
+                    # Get total size from Content-Length or Content-Range
+                    if resume_pos and 'Content-Range' in r.headers:
+                        # Content-Range format: "bytes start-end/total"
+                        total_size = int(r.headers['Content-Range'].split('/')[-1])
+                    else:
+                        total_size = int(r.headers.get('content-length', 0)) + resume_pos
+                    
+                    # Check if already complete (server returns 416 Range Not Satisfiable or 0 content-length)
+                    if r.status_code == 416 or (resume_pos > 0 and int(r.headers.get('content-length', 1)) == 0):
+                        print(f"Download already complete: {file_name}")
+                        return
+                    
+                    mode = 'ab' if resume_pos else 'wb'
+                    
+                    with open(file_path, mode) as f, tqdm(
+                        total=total_size,
+                        initial=resume_pos,
+                        unit='B',
+                        unit_scale=True,
+                        unit_divisor=1024,
+                        desc=file_name
+                    ) as pbar:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:  # Filter out keep-alive chunks
+                                f.write(chunk)
+                                pbar.update(len(chunk))
+                
                 print(f"Download completed: {file_name}")
                 return  # Success, exit the retry loop
                 
-            except subprocess.CalledProcessError as e:
+            except requests.exceptions.Timeout:
                 attempt += 1
-                # Exit code 4 typically means network failure/timeout in wget
-                # Exit code 8 means server error
                 if attempt < self.max_retries:
-                    print(f"\nDownload stalled or failed (attempt {attempt}/{self.max_retries}). "
-                          f"Retrying and continuing from where we left off...")
+                    print(f"\nDownload stalled - no data received for {self.timeout}s (attempt {attempt}/{self.max_retries})")
+                    print("Retrying and continuing from where we left off...")
+                else:
+                    print(f"\nDownload failed after {self.max_retries} attempts due to repeated stalls.")
+                    raise RuntimeError(f"Failed to download {file_name} after {self.max_retries} attempts - connection keeps stalling")
+            except (requests.exceptions.RequestException, IOError) as e:
+                attempt += 1
+                if attempt < self.max_retries:
+                    print(f"\nDownload failed (attempt {attempt}/{self.max_retries}): {e}")
+                    print("Retrying and continuing from where we left off...")
                 else:
                     print(f"\nDownload failed after {self.max_retries} attempts.")
-                    print(f"wget stderr: {e.stderr}")
                     raise RuntimeError(f"Failed to download {file_name} after {self.max_retries} attempts") from e
-            except FileNotFoundError:
-                raise RuntimeError("wget is not installed or not found in PATH. Please install wget.")
     
     def _unpack_tar(self, tar_file: str, out_folder: str) -> None:
         try:
