@@ -10,6 +10,27 @@ It simply syncs the entire S3 bucket and then extracts the dataset archives for 
 pip install bvi-aom
 ```
 
+## Usage
+
+### Command Line Interface
+
+Sync and extract the full dataset:
+
+```bash
+bvi-aom /path/to/storage
+```
+
+
+### Python API
+
+```python
+from bvi_aom import BVIAOMDataset
+
+# Sync the full dataset and extract all archives
+dataset = BVIAOMDataset("/path/to/storage")
+```
+
+
 This package depends on `awscli`. After installation, make sure the `aws` command is available on your `PATH`.  
 No AWS credentials are required because downloads use `--no-sign-request`.
 
@@ -33,32 +54,10 @@ No AWS credentials are required because downloads use `--no-sign-request`.
   - `272p.tar.gz`
   - `544p.tar.gz`
 
-The `README_bviaom.txt` file in the bucket is left as-is.
-
-## Usage
-
-### Command Line Interface
-
-Sync and extract the full dataset:
-
-```bash
-bvi-aom /path/to/storage
-```
-
-There are no resolution-specific options anymore; all resolutions are downloaded by default.
-
-### Python API
-
-```python
-from bvi_aom import BVIAOMDataset
-
-# Sync the full dataset and extract all archives
-dataset = BVIAOMDataset("/path/to/storage")
-```
 
 ## Notes and Requirements
 
-- Ensure you have **enough disk space** for all resolutions (tens of GB).
+- Ensure you have **enough disk space** for all resolutions.
 - If you re-run the command or Python API, `aws s3 sync` will only fetch changed/missing files, and already-extracted archives that no longer exist will be skipped safely.
 
 ## Dataset Information
